@@ -1,0 +1,11 @@
+{
+  "name": "ideudas-voice-booking-functions",
+  "version": "0.1.0",
+  "main": "index.js",
+  "engines": { "node": "20" },
+  "dependencies": {
+    "firebase-admin": "^11.0.0",
+    "firebase-functions": "^4.0.0",
+    "googleapis": "^133.0.0"
+  }
+}
