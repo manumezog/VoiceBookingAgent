@@ -1,5 +1,12 @@
 # Google Cloud service account credentials
 functions/service-account.json
+
+# Environment files with secrets
+.env.local
+.env
+setup-env.bat
+functions/.env
+
 # Logs
 logs
 *.log

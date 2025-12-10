@@ -22,3 +22,5 @@ export const calendarSearch = httpsCallable(functions, "calendar_search");
 export const calendarCreate = httpsCallable(functions, "calendar_create");
 export const storeBooking = httpsCallable(functions, "store_booking");
 export const llmAgent = httpsCallable(functions, "llm_agent");
+export const getRealtimeToken = httpsCallable(functions, "get_realtime_token");
+export const generateConversationSummary = httpsCallable(functions, "generate_conversation_summary");
