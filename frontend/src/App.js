@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import './App.css';
-import { calendarSearch, calendarCreate, storeBooking, llmAgent } from "./firebase";
+import { calendarSearch, calendarCreate, storeBooking, llmAgent, getRealtimeToken, generateConversationSummary } from "./firebase";
+import RealtimeAgent from "./realtimeAgent";
 
 function App() {
   const [step, setStep] = useState(1);
@@ -16,13 +17,25 @@ function App() {
   const [availableSlots, setAvailableSlots] = useState([]);
   const [conversation, setConversation] = useState([]);
   const [showPromptEditor, setShowPromptEditor] = useState(false);
-  const defaultPrompt = `Eres Sofia, asistente virtual de reservas de Ideudas (consultoría legal de alivio de deudas).
+  const [conversationSummary, setConversationSummary] = useState("");
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [unspokenText, setUnspokenText] = useState(""); // Track text that couldn't be spoken
+  const realtimeAgentRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const [useRealtime, setUseRealtime] = useState(false); // Disabled for now - use traditional mode
+  const defaultPrompt = `Eres Manuel, asistente virtual de reservas de Ideudas (consultoría legal de alivio de deudas).
 
 OBJETIVO: Agendar una consulta gratuita de 30 minutos lo MÁS RÁPIDO posible. Mantén la llamada CORTA.
 
+CONTEXTO DEL CLIENTE:
+- Nombre: {name}
+- Email: {email}
+- Teléfono: {phone}
+- Ya ha proporcionado estos datos en el formulario inicial.
+
 REGLAS CRÍTICAS:
 1. NUNCA saludes más de una vez. Después del saludo inicial, ve DIRECTO al grano.
-2. NUNCA preguntes nombre, email o teléfono - ya los tienes.
+2. NUNCA preguntes nombre, email o teléfono - ya los tienes en el contexto.
 3. SIEMPRE di las horas con "de la mañana" o "de la tarde" (ejemplo: "10 de la mañana", "3 de la tarde").
 4. SIEMPRE menciona que el cliente puede pulsar directamente el botón con el horario que prefiera.
 5. Respuestas ULTRA CORTAS - máximo 2 frases.
@@ -30,7 +43,9 @@ REGLAS CRÍTICAS:
 7. NO hagas preguntas innecesarias. NO pidas confirmaciones extra.
 8. Si el usuario menciona una hora, ACEPTA y RESERVA inmediatamente.
 9. Responde SIEMPRE en español.
-10. Tu meta es terminar la llamada en menos de 3 intercambios.`;
+10. Tu meta es terminar la llamada en menos de 3 intercambios.
+11. Mantén el contexto de la conversación - si el usuario menciona un problema con las fechas, entiende que necesita horarios disponibles.
+12. Si el usuario da información sobre su situación (ej: "jueves 11 de diciembre"), úsala para ofrecer horarios cercanos a esa preferencia.`;
   const [systemPrompt, setSystemPrompt] = useState(defaultPrompt);
 
   useEffect(() => {
@@ -47,6 +62,41 @@ REGLAS CRÍTICAS:
     const dateRegex = /(\w{3,9} \d{1,2}, \d{4} \d{1,2}:\d{2} ?[APMapm]{0,2})|((\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}))/;
     const match = text.match(dateRegex);
     return match ? match[0] : null;
+  }
+
+  // Safe speech synthesis with fallback for mobile
+  function speak(text, onEnd) {
+    if (!('speechSynthesis' in window)) {
+      setUnspokenText(text);
+      if (onEnd) setTimeout(onEnd, 500);
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'es-ES';
+      utterance.rate = 1.5;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      
+      utterance.onend = () => {
+        setUnspokenText("");
+        if (onEnd) onEnd();
+      };
+      
+      utterance.onerror = (event) => {
+        console.error('Speech synthesis error:', event);
+        setUnspokenText(text); // Fallback: show text if audio fails
+        if (onEnd) onEnd();
+      };
+      
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.error('Speech error:', err);
+      setUnspokenText(text);
+      if (onEnd) onEnd();
+    }
   }
 
   // Detect if user is confirming/accepting a time
@@ -68,23 +118,47 @@ REGLAS CRÍTICAS:
       return slots[1];
     }
     
-    // Extract hour from user input
-    const hourMatch = lower.match(/(\d{1,2})\s*(am|pm|a\.m|p\.m|de la mañana|de la tarde)?/i);
-    if (hourMatch) {
-      let hour = parseInt(hourMatch[1]);
-      const isPM = hourMatch[2] && (hourMatch[2].includes('p') || hourMatch[2].includes('tarde'));
-      if (isPM && hour < 12) hour += 12;
-      if (!isPM && hour === 12) hour = 0;
+    // Try to match time patterns: "12 del mediodía", "las 12", "12 pm", etc.
+    let targetHour = null;
+    
+    // Match "X de la mañana" or "X de la tarde" or "las X"
+    const timePattern = /(?:las\s+)?(\d{1,2})\s*(?:de la|del)?\s*(?:mañana|mediodía|tarde|am|pm)?/i;
+    const timeMatch = text.match(timePattern);
+    
+    if (timeMatch) {
+      let hour = parseInt(timeMatch[1]);
+      const isMorning = lower.includes('mañana');
+      const isAfternoon = lower.includes('tarde');
+      const isMidday = lower.includes('mediodía');
       
-      // Find slot that matches the hour
-      return slots.find(slot => {
-        const slotDate = new Date(slot.start);
-        return slotDate.getHours() === hour || slotDate.getHours() === hour + 12;
-      });
+      // Adjust hour based on time of day
+      if (isAfternoon && hour < 12 && hour !== 12) {
+        hour += 12;
+      } else if (isMorning && hour === 12) {
+        hour = 0;
+      } else if (isMidday) {
+        // Mediodía is 12pm = hour 12
+        hour = 12;
+      }
+      targetHour = hour;
     }
     
-    // If user just confirms, return first available
-    if (detectConfirmation(text)) {
+    // Find slot that matches the hour
+    if (targetHour !== null) {
+      const matched = slots.find(slot => {
+        const slotDate = new Date(slot.start);
+        const slotHour = slotDate.getHours();
+        return slotHour === targetHour || slotHour === (targetHour % 24);
+      });
+      
+      if (matched) {
+        console.log(`Matched slot with hour ${targetHour}: ${matched.time}`);
+        return matched;
+      }
+    }
+    
+    // If user just confirms without specifying time, return first available
+    if (detectConfirmation(text) && !lower.includes('diciembre') && !lower.includes('jueves')) {
       return slots[0];
     }
     
@@ -106,26 +180,17 @@ REGLAS CRÍTICAS:
       
       try {
         const createRes = await calendarCreate({ slot: matchedSlot, name: form.name, email: form.email, phone: form.phone });
-        const expert = createRes.data?.expert || { name: 'Experto Ideudas' };
-        setCalendarLog(prev => prev + `\n[Calendario] Evento creado con experto: ${expert.name}`);
+        setCalendarLog(prev => prev + `\n[Calendario] Evento creado exitosamente`);
         setCalendarLog(prev => prev + `\n[Calendario] Enviando invitación a ${form.email}...`);
-        await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: { ...matchedSlot, expert: expert.name }, transcript });
-        setAppointment({ ...matchedSlot, expert: expert.name });
+        await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: matchedSlot, transcript });
+        setAppointment(matchedSlot);
         setCalendarLog(prev => prev + '\n[Calendario] ✓ Reserva completada exitosamente');
         
         // Say goodbye and end call
         const goodbye = `Perfecto ${form.name}, tu cita queda reservada para ${matchedSlot.time}. Recibirás la invitación en ${form.email}. ¡Hasta pronto!`;
-        setTranscript(t => t + '\nSofia: ' + goodbye);
+        setTranscript(t => t + '\nManuel: ' + goodbye);
         
-        if ('speechSynthesis' in window) {
-          const utterance = new SpeechSynthesisUtterance(goodbye);
-          utterance.lang = 'es-ES';
-          utterance.rate = 1.5;
-          utterance.onend = () => setStep(3);
-          window.speechSynthesis.speak(utterance);
-        } else {
-          setStep(3);
-        }
+        speak(goodbye, () => setStep(3));
         return;
       } catch (err) {
         console.error('Booking error:', err);
@@ -134,7 +199,18 @@ REGLAS CRÍTICAS:
     }
     
     // No confirmation detected, proceed with LLM
+    // Include system message with user context and available slots
+    const systemMessage = systemPrompt
+      .replace('{name}', form.name)
+      .replace('{email}', form.email)
+      .replace('{phone}', form.phone);
+    
+    const slotsContext = availableSlots.length > 0 
+      ? `\n\nHORARIOS DISPONIBLES:\n${availableSlots.map((s, i) => `${i + 1}. ${s.time}`).join('\n')}`
+      : '';
+    
     const updated = [
+      { role: 'system', content: systemMessage + slotsContext },
       ...conversation,
       { role: 'user', content: finalTranscript }
     ];
@@ -146,11 +222,11 @@ REGLAS CRÍTICAS:
       console.log('LLM response:', res);
       const reply = res.data?.reply || '';
       if (!reply) {
-        setTranscript(t => t + '\nSofia: (Sin respuesta del LLM)');
+        setTranscript(t => t + '\nManuel: (Sin respuesta del LLM)');
         return;
       }
       setConversation(c => [...c, { role: 'assistant', content: reply }]);
-      setTranscript(t => t + (t ? '\n' : '') + 'Sofia: ' + reply);
+      setTranscript(t => t + (t ? '\n' : '') + 'Manuel: ' + reply);
       
       if ('speechSynthesis' in window) {
         const utterance = new SpeechSynthesisUtterance(reply);
@@ -167,12 +243,17 @@ REGLAS CRÍTICAS:
           }, 1000);
         };
         
-        window.speechSynthesis.speak(utterance);
+        speak(reply, () => {
+          setTimeout(() => {
+            setIsAutoListening(true);
+            startListening();
+          }, 1000);
+        });
       }
-    } catch (err) {
-      console.error('Error in handleSpeechEnd:', err);
-      setCalendarLog(prev => prev + `\n[Error] ${err.message}`);
-      setTranscript(t => t + '\nSofia: (Error: ' + err.message + ')');
+      } catch (err) {
+        console.error('Error in handleSpeechEnd:', err);
+        setCalendarLog(prev => prev + `\n[Error] ${err.message}`);
+        setTranscript(t => t + '\nManuel: (Error: ' + err.message + ')');
     }
   };
 
@@ -265,7 +346,7 @@ FRANJAS DISPONIBLES: ${slotsText}
 
 INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases. Si el usuario confirma cualquier hora, reserva y despídete. Recuerda mencionar que pueden pulsar el botón del horario preferido.`;
     
-    const intro = `¡Hola ${form.name}! Soy Sofia de Ideudas. Tengo disponible ${slotsText}. Puedes decirme cuál prefieres o pulsar directamente el botón del horario que te venga mejor.`;
+    const intro = `¡Hola ${form.name}! Soy Manuel de Ideudas. Tengo disponible ${slotsText}. Puedes decirme cuál prefieres o pulsar directamente el botón del horario que te venga mejor.`;
     
     // Initialize conversation with full context
     setConversation([
@@ -273,7 +354,18 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
       { role: 'system', content: userContext },
       { role: 'assistant', content: intro }
     ]);
-    setTranscript('Sofia: ' + intro);
+    
+    // If using Realtime, skip the intro TTS and go directly to connection
+    if (useRealtime) {
+      setTranscript('');
+      setCalendarLog(prev => prev + '\n[Realtime] Iniciando conexión en vivo...');
+      setTimeout(() => {
+        initializeRealtime();
+      }, 500);
+      return;
+    }
+    
+    setTranscript('Manuel: ' + intro);
     setCalendarLog(prev => prev + '\n[TTS] Iniciando síntesis de voz...');
     
     // Speak the greeting
@@ -307,21 +399,67 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
           console.log('Speech synthesis ended');
           setCalendarLog(prev => prev + '\n[TTS] ✓ Completado. Iniciando escucha...');
           setTimeout(() => {
-            setIsAutoListening(true);
-            startListening();
+            if (useRealtime) {
+              initializeRealtime();
+            } else {
+              setIsAutoListening(true);
+              startListening();
+            }
           }, 1000);
         };
         
-        window.speechSynthesis.speak(utterance);
+        speak(formattedReply, () => {
+          console.log('Speech synthesis ended');
+          setCalendarLog(prev => prev + '\n[TTS] ✓ Completado. Iniciando escucha...');
+          setTimeout(() => {
+            if (useRealtime) {
+              initializeRealtime();
+            } else {
+              setIsAutoListening(true);
+              startListening();
+            }
+          }, 1000);
+        });
       }, 100);
     } else {
       setCalendarLog(prev => prev + '\n[TTS] ✗ Síntesis de voz no disponible');
       // Auto-start listening if TTS not available
       setTimeout(() => {
+        if (useRealtime) {
+          initializeRealtime();
+        } else {
+          setIsAutoListening(true);
+          startListening();
+        }
+      }, 1000);
+    }
+  };
+
+  const initializeRealtime = async () => {
+    try {
+      setCalendarLog(prev => prev + '\n[Realtime] Iniciando modo conversación mejorado...');
+      
+      setListening(true);
+      setCalendarLog(prev => prev + '\n[Audio] Escuchando...');
+      
+      // For now, use Deepgram-style approach: Use Web Speech API but with continuous mode
+      // This gives us better real-time feel while avoiding audio WebSocket complexity
+      startListening();
+
+    } catch (error) {
+      console.error('Failed to initialize Realtime:', error);
+      setCalendarLog(prev => prev + `\n[Error] ${error.message}`);
+      setUseRealtime(false);
+      setTimeout(() => {
         setIsAutoListening(true);
         startListening();
       }, 1000);
     }
+  };
+
+  const stopRealtime = () => {
+    // Currently using Web Speech API, so nothing special to clean up
+    // This is here for future expansion
   };
 
   // Handle slot button click - book immediately
@@ -331,16 +469,15 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
     
     try {
       const createRes = await calendarCreate({ slot, name: form.name, email: form.email, phone: form.phone });
-      const expert = createRes.data?.expert || { name: 'Experto Ideudas' };
-      setCalendarLog(prev => prev + `\n[Calendario] Evento creado con: ${expert.name}`);
+      setCalendarLog(prev => prev + `\n[Calendario] Evento creado exitosamente`);
       setCalendarLog(prev => prev + `\n[Calendario] Enviando invitación a ${form.email}...`);
-      await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: { ...slot, expert: expert.name }, transcript });
-      setAppointment({ ...slot, expert: expert.name });
+      await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: slot, transcript });
+      setAppointment(slot);
       setCalendarLog(prev => prev + '\n[Calendario] ✓ Reserva completada');
       
       // Say goodbye
       const goodbye = `Perfecto ${form.name}, tu cita queda reservada para ${slot.time}. Recibirás la invitación en ${form.email}. ¡Hasta pronto!`;
-      setTranscript(t => t + '\nSofia: ' + goodbye);
+      setTranscript(t => t + '\nManuel: ' + goodbye);
       
       // Stop listening
       if (recognitionRef.current) {
@@ -348,19 +485,11 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
       }
       window.speechSynthesis.cancel();
       
-      if ('speechSynthesis' in window) {
-        const utterance = new SpeechSynthesisUtterance(goodbye);
-        utterance.lang = 'es-ES';
-        utterance.rate = 1.5;
-        utterance.onend = () => setStep(3);
-        window.speechSynthesis.speak(utterance);
-      } else {
-        setStep(3);
-      }
+      speak(goodbye, () => setStep(3));
     } catch (err) {
       console.error('Booking error:', err);
       setCalendarLog(prev => prev + `\n[Error] ${err.message}`);
-      setTranscript(t => t + '\nSofia: Hubo un error al reservar. Por favor, intenta de nuevo.');
+      setTranscript(t => t + '\nManuel: Hubo un error al reservar. Por favor, intenta de nuevo.');
     }
   };
 
@@ -368,7 +497,24 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
     if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
+    stopRealtime(); // Stop Realtime connection if active
     window.speechSynthesis.cancel();
+    setListening(false);
+    setIsAutoListening(false);
+    
+    // Generate conversation summary
+    setLoadingSummary(true);
+    try {
+      const result = await generateConversationSummary({ transcript });
+      setConversationSummary(result.data.summary);
+    } catch (err) {
+      console.error('Summary generation error:', err);
+      setConversationSummary('No se pudo generar el resumen');
+    } finally {
+      setLoadingSummary(false);
+    }
+    
+    // Show success screen with conversation summary
     setStep(3);
   };
 
@@ -405,6 +551,24 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
               </button>
             </div>
           )}
+
+          <div className="prompt-editor-toggle">
+            <label style={{display: 'flex', alignItems: 'center', gap: '10px', marginTop: '1.5rem', cursor: 'pointer', opacity: 0.6}}>
+              <input 
+                type="checkbox" 
+                checked={useRealtime} 
+                onChange={(e) => setUseRealtime(e.target.checked)}
+                style={{width: '18px', height: '18px', cursor: 'pointer'}}
+                disabled
+              />
+              <span style={{fontSize: '0.95rem', color: '#999'}}>
+                🔄 Modo Realtime (En Desarrollo)
+              </span>
+            </label>
+            <p style={{fontSize: '0.85rem', color: '#ccc', margin: '0.5rem 0 0 28px'}}>
+              Próximamente: Conversación completamente en tiempo real
+            </p>
+          </div>
         </form>
       )}
       {step === 2 && (
@@ -416,7 +580,7 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
               {transcript ? (
                 <>
                   {transcript.split('\n').filter(line => line.trim()).map((line, idx) => (
-                    <div key={idx} className={`message ${line.startsWith('Sofia:') ? 'sofia-message' : 'user-message'}`}>
+                    <div key={idx} className={`message ${line.startsWith('Manuel:') ? 'sofia-message' : 'user-message'}`}>
                       {line}
                     </div>
                   ))}
@@ -447,7 +611,6 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
             </div>
           )}
           
-          <button className="end-call" onClick={stopListening}>Detener Escucha</button>
           <div className="calendar-log">
             <h3>Registro de Calendario</h3>
             <div className="log-box">{calendarLog || "(Los registros aparecerán aquí)"}</div>
@@ -455,27 +618,54 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
           <button className="end-call" onClick={handleEndCall}>Finalizar Llamada</button>
         </div>
       )}
-      {step === 3 && appointment && (
+      {step === 3 && (
         <div className="success">
-          <h2>¡Éxito! Tu Cita Ha Sido Reservada.</h2>
-          <p><strong>Fecha:</strong> {appointment.date || appointment.time?.split(' ')[0]}</p>
-          <p><strong>Hora:</strong> {appointment.time}</p>
-          <p><strong>Experto:</strong> {appointment.expert}</p>
-          <p>Una invitación de calendario con tu enlace de videollamada ha sido enviada a <strong>{form.email}</strong>.</p>
+          {appointment ? (
+            <>
+              <h2>¡Éxito! Tu Cita Ha Sido Reservada.</h2>
+              <p><strong>Fecha:</strong> {appointment.date || appointment.time?.split(' ')[0]}</p>
+              <p><strong>Hora:</strong> {appointment.time}</p>
+              <p>Una invitación de calendario con tu enlace de videollamada ha sido enviada a <strong>{form.email}</strong>.</p>
+            </>
+          ) : (
+            <>
+              <h2>Fin de la Llamada</h2>
+              <p>Gracias por usar el Agente de Reservas de Ideudas.</p>
+            </>
+          )}
+          
           <div className="conversation-summary">
             <h3>📝 Resumen de la Conversación</h3>
             <div className="summary-box">
-              {transcript.split('\n').filter(line => line.trim()).map((line, idx) => (
-                <div key={idx} className={`message ${line.startsWith('Sofia:') ? 'sofia-message' : 'user-message'}`}>
-                  {line}
-                </div>
-              ))}
+              {loadingSummary ? (
+                <p style={{fontStyle: 'italic', color: '#999'}}>Generando resumen...</p>
+              ) : (
+                <p>{conversationSummary}</p>
+              )}
             </div>
           </div>
+          
+          {unspokenText && (
+            <div style={{padding: '1rem', backgroundColor: '#fff3cd', borderRadius: '8px', marginBottom: '1rem', border: '1px solid #ffc107'}}>
+              <p><strong>🔊 Mensaje de audio no se escuchó en tu dispositivo:</strong></p>
+              <p style={{marginBottom: '1rem', color: '#333'}}>{unspokenText}</p>
+              <button onClick={() => speak(unspokenText)} className="cta" style={{width: '100%'}}>
+                ▶ Reproducir Audio
+              </button>
+            </div>
+          )}
+          
           <div className="calendar-log">
-            <h3>Detalles de Reserva</h3>
+            <h3>📋 Registro de Acciones</h3>
             <div className="log-box">{calendarLog}</div>
           </div>
+          
+          {appointment && (
+            <div className="calendar-log">
+              <h3>✓ Detalles de Reserva</h3>
+              <div className="log-box">{calendarLog}</div>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -10,7 +10,6 @@ admin.initializeApp();
 const db = admin.firestore();
 
 const IDEUDAS_CALENDAR_ID = 'manumezog@gmail.com';
-const OPENROUTER_API_KEY = defineSecret('OPENROUTER_API_KEY');
 
 const EXPERTS = [
   { name: 'Maria Lopez', email: 'maria.lopez@ideudas.com' },
@@ -33,9 +32,10 @@ function assignExpert(slot) {
 }
 
 exports.llm_agent = functions.https.onCall(async (data, context) => {
-  const apiKey = OPENROUTER_API_KEY.value();
+  // Load OpenRouter API key from environment variables
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    throw new functions.https.HttpsError('failed-precondition', 'OpenRouter API key not set.');
+    throw new functions.https.HttpsError('failed-precondition', 'OpenRouter API key not configured');
   }
   const { messages, model } = data;
   const chosenModel = model || 'openai/gpt-3.5-turbo';
@@ -154,7 +154,6 @@ exports.calendar_create = functions.https.onCall(async (data, context) => {
     // Client info is stored in description instead
     const eventRes = await calendar.events.insert({
       calendarId: IDEUDAS_CALENDAR_ID,
-      conferenceDataVersion: 1,
       requestBody: {
         summary: `Consulta Gratuita - ${name} - Ideudas`,
         description: `CONSULTA GRATUITA SIN COMPROMISO - IDEUDAS
@@ -163,19 +162,15 @@ exports.calendar_create = functions.https.onCall(async (data, context) => {
 • Nombre: ${name}
 • Email: ${email}
 • Teléfono: ${phone || 'No proporcionado'}
-• Experto asignado: ${expert.name}
 
 📞 Esta es una consulta gratuita de 30 minutos sobre alivio de deudas.
+
+🔗 ENLACE DE VIDEOLLAMADA:
+https://meet.google.com/new
 
 ⚠️ IMPORTANTE: Contactar al cliente en ${email} o ${phone || 'N/A'} para confirmar la cita y enviar el enlace de Google Meet.`,
         start: { dateTime: slot.start, timeZone: 'America/New_York' },
         end: { dateTime: slot.end, timeZone: 'America/New_York' },
-        conferenceData: {
-          createRequest: {
-            requestId: `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-            conferenceSolutionKey: { type: 'hangoutsMeet' }
-          }
-        },
         colorId: '10', // Green color for consultation events
         reminders: {
           useDefault: false,
@@ -210,4 +205,90 @@ exports.store_booking = functions.https.onCall(async (data, context) => {
   }
   await db.collection('bookings').add(bookingData);
   return { success: true };
+});
+
+exports.get_realtime_token = functions.https.onCall(async (data, context) => {
+  const apiKey = OPENAI_API_KEY.value();
+  if (!apiKey) {
+    throw new functions.https.HttpsError('failed-precondition', 'OpenAI API key not configured');
+  }
+  
+  try {
+    // Get ephemeral token from OpenAI for secure Realtime API access
+    const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-realtime-preview-2024-12-26',
+        voice: 'alloy'
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(`OpenAI API error: ${error.error?.message || 'Unknown error'}`);
+    }
+
+    const session = await response.json();
+    
+    return {
+      token: session.client_secret?.value || '',
+      sessionId: session.id,
+      expiresAt: session.expires_at
+    };
+  } catch (err) {
+    console.error('Failed to get realtime token:', err);
+    throw new functions.https.HttpsError('internal', 'Failed to get realtime token: ' + err.message);
+  }
+});
+
+exports.generate_conversation_summary = functions.https.onCall(async (data, context) => {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new functions.https.HttpsError('failed-precondition', 'OpenRouter API key not configured');
+  }
+  
+  const { transcript } = data;
+  if (!transcript) {
+    throw new functions.https.HttpsError('invalid-argument', 'Transcript is required');
+  }
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://voicebookingagent.web.app',
+        'X-Title': 'Ideudas Voice Booking Agent',
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: 'Eres un asistente que resume conversaciones de reserva de consultas legales. Genera un resumen breve (máximo 3-4 oraciones) que capture los puntos clave: qué servicios se discutieron, si se reservó cita (y cuándo), y cualquier información relevante.'
+          },
+          {
+            role: 'user',
+            content: `Por favor, resume esta conversación de reserva:\n\n${transcript}`
+          }
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('OpenRouter API error');
+    }
+
+    const result = await response.json();
+    const summary = result.choices?.[0]?.message?.content || 'No se pudo generar el resumen';
+    return { summary };
+  } catch (err) {
+    console.error('Summary generation error:', err);
+    throw new functions.https.HttpsError('internal', 'Failed to generate summary: ' + err.message);
+  }
 });
