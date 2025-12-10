@@ -45,6 +45,8 @@ exports.llm_agent = functions.https.onCall(async (data, context) => {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://voicebookingagent.web.app',
+        'X-Title': 'Ideudas Voice Booking Agent',
       },
       body: JSON.stringify({
         model: chosenModel,
@@ -66,6 +68,8 @@ exports.calendar_search = functions.https.onCall(async (data, context) => {
   const calendar = getCalendarClient();
   const now = new Date();
   const end = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+  
+  // Get events and check transparency (free/busy)
   const events = await calendar.events.list({
     calendarId: IDEUDAS_CALENDAR_ID,
     timeMin: now.toISOString(),
@@ -73,65 +77,117 @@ exports.calendar_search = functions.https.onCall(async (data, context) => {
     singleEvents: true,
     orderBy: 'startTime',
   });
+  
+  // Filter only BUSY events (ignore events marked as "free"/transparent)
+  const busyEvents = (events.data.items || []).filter(event => {
+    // transparency: 'transparent' means "free", 'opaque' or undefined means "busy"
+    return event.transparency !== 'transparent';
+  });
+  
   const slots = [];
   let current = new Date(now);
-  current.setHours(9, 0, 0, 0);
-  while (current < end) {
+  
+  // If current time is past 6pm, start from 9am next day
+  if (current.getHours() >= 18) {
+    current.setDate(current.getDate() + 1);
+    current.setHours(9, 0, 0, 0);
+  } else if (current.getHours() < 9) {
+    current.setHours(9, 0, 0, 0);
+  } else {
+    // Round up to next 30-min slot
+    const minutes = current.getMinutes();
+    if (minutes > 0 && minutes <= 30) {
+      current.setMinutes(30, 0, 0);
+    } else if (minutes > 30) {
+      current.setHours(current.getHours() + 1, 0, 0, 0);
+    }
+  }
+  
+  while (current < end && slots.length < 5) {
     const slotEnd = new Date(current.getTime() + 30 * 60 * 1000);
-    if (slotEnd.getHours() > 18) {
+    
+    // Skip if outside business hours (9am-6pm)
+    if (current.getHours() < 9 || slotEnd.getHours() > 18 || (slotEnd.getHours() === 18 && slotEnd.getMinutes() > 0)) {
       current.setDate(current.getDate() + 1);
       current.setHours(9, 0, 0, 0);
       continue;
     }
-    const conflict = events.data.items.some(event => {
+    
+    // Check for conflicts only with BUSY events
+    const conflict = busyEvents.some(event => {
       const eventStart = new Date(event.start.dateTime || event.start.date);
       const eventEnd = new Date(event.end.dateTime || event.end.date);
       return current < eventEnd && slotEnd > eventStart;
     });
+    
     if (!conflict) {
+      // Format time nicely in Spanish with AM/PM
+      const hour = current.getHours();
+      const minute = current.getMinutes();
+      const ampm = hour >= 12 ? 'de la tarde' : 'de la mañana';
+      const hour12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+      const minuteStr = minute === 0 ? '' : `:${minute.toString().padStart(2, '0')}`;
+      
+      const dayNames = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+      const monthNames = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+      
+      const timeStr = `${dayNames[current.getDay()]}, ${current.getDate()} de ${monthNames[current.getMonth()]}, ${hour12}${minuteStr} ${ampm}`;
+      
       slots.push({
         start: current.toISOString(),
         end: slotEnd.toISOString(),
-        time: current.toLocaleString(),
+        time: timeStr,
       });
-      if (slots.length >= 3) break;
     }
     current = slotEnd;
   }
+  
   return { slots };
 });
 
 exports.calendar_create = functions.https.onCall(async (data, context) => {
-  const { slot, name, email } = data;
+  const { slot, name, email, phone } = data;
   const calendar = getCalendarClient();
   const expert = assignExpert(slot);
   try {
+    // Create event WITHOUT attendees to avoid Domain-Wide Delegation requirement
+    // Client info is stored in description instead
     const eventRes = await calendar.events.insert({
       calendarId: IDEUDAS_CALENDAR_ID,
-      sendUpdates: 'all',
       conferenceDataVersion: 1,
       requestBody: {
-        summary: 'Free, No-Commitment Consultation - Ideudas',
-        description: `Thank you for booking! This is your free consultation with ${expert.name}, an Ideudas legal expert. The Google Meet link is below.`,
+        summary: `Consulta Gratuita - ${name} - Ideudas`,
+        description: `CONSULTA GRATUITA SIN COMPROMISO - IDEUDAS
+
+📋 DATOS DEL CLIENTE:
+• Nombre: ${name}
+• Email: ${email}
+• Teléfono: ${phone || 'No proporcionado'}
+• Experto asignado: ${expert.name}
+
+📞 Esta es una consulta gratuita de 30 minutos sobre alivio de deudas.
+
+⚠️ IMPORTANTE: Contactar al cliente en ${email} o ${phone || 'N/A'} para confirmar la cita y enviar el enlace de Google Meet.`,
         start: { dateTime: slot.start, timeZone: 'America/New_York' },
         end: { dateTime: slot.end, timeZone: 'America/New_York' },
-        attendees: [
-          { email: email, displayName: name, responseStatus: 'needsAction' },
-          { email: expert.email, displayName: expert.name, responseStatus: 'needsAction' }
-        ],
         conferenceData: {
           createRequest: {
             requestId: `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
             conferenceSolutionKey: { type: 'hangoutsMeet' }
           }
         },
-        guestCanModify: false,
-        guestCanInviteOthers: false,
-        guestCanSeeOtherGuests: true
+        colorId: '10', // Green color for consultation events
+        reminders: {
+          useDefault: false,
+          overrides: [
+            { method: 'popup', minutes: 30 },
+            { method: 'popup', minutes: 10 }
+          ]
+        }
       },
     });
     const meetLink = eventRes.data.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri || '';
-    console.log('Calendar event created:', eventRes.data.id, 'with attendees:', eventRes.data.attendees);
+    console.log('Calendar event created:', eventRes.data.id, 'Meet link:', meetLink);
     return { success: true, expert, meetLink, eventId: eventRes.data.id };
   } catch (err) {
     console.error('Calendar create error:', err.message);
@@ -141,13 +197,17 @@ exports.calendar_create = functions.https.onCall(async (data, context) => {
 
 exports.store_booking = functions.https.onCall(async (data, context) => {
   const { name, email, phone, appointment, transcript } = data;
-  await db.collection('bookings').add({
-    name,
-    email,
-    phone,
-    appointment,
-    transcript,
+  const bookingData = {
+    name: name || '',
+    email: email || '',
+    phone: phone || '',
+    transcript: transcript || '',
     created: admin.firestore.FieldValue.serverTimestamp()
-  });
+  };
+  // Only add appointment if it's defined
+  if (appointment) {
+    bookingData.appointment = appointment;
+  }
+  await db.collection('bookings').add(bookingData);
   return { success: true };
 });

@@ -79,11 +79,68 @@ body, html {
 
 .transcript-box {
   min-height: 60px;
+  max-height: 250px;
+  overflow-y: auto;
   background: #f0f4f8;
   border-radius: 6px;
   padding: 0.75rem;
-  font-size: 1rem;
+  font-size: 0.95rem;
   color: #333;
+  word-wrap: break-word;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  line-height: 1.5;
+}
+
+.transcript-box .message {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem;
+  border-radius: 6px;
+}
+
+.transcript-box .sofia-message {
+  color: #1565c0;
+  background: #e3f2fd;
+  border-left: 3px solid #1976d2;
+}
+
+.transcript-box .user-message {
+  color: #2e7d32;
+  background: #e8f5e9;
+  border-left: 3px solid #4caf50;
+}
+
+.transcript-box .live-message {
+  color: #757575;
+  font-style: italic;
+  background: #fafafa;
+  border-left: 3px solid #9e9e9e;
+}
+
+.calendar-log {
+  width: 100%;
+  margin-top: 1rem;
+}
+
+.calendar-log h3 {
+  margin: 0.5rem 0;
+  font-size: 0.95rem;
+  color: #666;
+}
+
+.log-box {
+  min-height: 40px;
+  max-height: 150px;
+  overflow-y: auto;
+  background: #fff3e0;
+  border-left: 3px solid #ff9800;
+  border-radius: 4px;
+  padding: 0.5rem;
+  font-size: 0.85rem;
+  color: #333;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Courier New', monospace;
+  line-height: 1.4;
 }
 
 .end-call {
@@ -106,6 +163,176 @@ body, html {
 .success {
   text-align: center;
   color: #1976d2;
+  width: 100%;
+}
+
+.success h2 {
+  margin-bottom: 1.5rem;
+}
+
+.success p {
+  margin: 0.75rem 0;
+  font-size: 0.95rem;
+}
+
+.conversation-summary {
+  width: 100%;
+  margin-top: 1.5rem;
+  text-align: left;
+}
+
+.conversation-summary h3 {
+  color: #1976d2;
+  margin-bottom: 0.75rem;
+  font-size: 1rem;
+}
+
+.summary-box {
+  max-height: 200px;
+  overflow-y: auto;
+  background: #fafafa;
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.summary-box .message {
+  margin-bottom: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+}
+
+.summary-box .sofia-message {
+  color: #1565c0;
+  background: #e3f2fd;
+  border-left: 2px solid #1976d2;
+}
+
+.summary-box .user-message {
+  color: #2e7d32;
+  background: #e8f5e9;
+  border-left: 2px solid #4caf50;
+}
+
+/* Prompt Editor Styles */
+.prompt-editor-toggle {
+  margin-top: 1.5rem;
+  width: 100%;
+}
+
+.toggle-btn {
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: #666;
+  width: 100%;
+  text-align: left;
+  transition: background 0.2s;
+}
+
+.toggle-btn:hover {
+  background: #e8e8e8;
+}
+
+.prompt-editor {
+  margin-top: 1rem;
+  width: 100%;
+  background: #fafafa;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.prompt-editor label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  color: #333;
+}
+
+.prompt-editor textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: 'Courier New', monospace;
+  resize: vertical;
+  min-height: 200px;
+  line-height: 1.4;
+}
+
+.prompt-editor textarea:focus {
+  outline: none;
+  border-color: #1976d2;
+  box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2);
+}
+
+.reset-btn {
+  margin-top: 0.75rem;
+  background: #ff9800;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+
+.reset-btn:hover {
+  background: #f57c00;
+}
+
+/* Slot Buttons Styles */
+.slot-buttons {
+  width: 100%;
+  background: #e8f5e9;
+  border: 1px solid #4caf50;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 0.5rem 0;
+}
+
+.slot-buttons h4 {
+  margin: 0 0 0.75rem 0;
+  color: #2e7d32;
+  font-size: 0.95rem;
+}
+
+.slots-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.slot-btn {
+  background: #4caf50;
+  color: white;
+  border: none;
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: all 0.2s;
+  flex: 1;
+  min-width: 120px;
+  text-align: center;
+}
+
+.slot-btn:hover {
+  background: #388e3c;
+  transform: translateY(-2px);
+  box-shadow: 0 2px 8px rgba(76, 175, 80, 0.4);
+}
+
+.slot-btn:active {
+  transform: translateY(0);
 }
 
 @media (max-width: 600px) {
@@ -116,5 +343,17 @@ body, html {
   .form input, .cta, .end-call {
     font-size: 1rem;
     padding: 0.65rem;
+  }
+  .transcript-box {
+    max-height: 150px;
+  }
+  .log-box {
+    max-height: 120px;
+  }
+  .slot-btn {
+    min-width: 100%;
+  }
+  .prompt-editor textarea {
+    min-height: 150px;
   }
 }

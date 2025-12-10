@@ -15,7 +15,8 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
-export const functions = getFunctions(app);
+// Explicitly target deployed region to avoid callable CORS/timeout issues
+export const functions = getFunctions(app, "us-central1");
 
 export const calendarSearch = httpsCallable(functions, "calendar_search");
 export const calendarCreate = httpsCallable(functions, "calendar_create");

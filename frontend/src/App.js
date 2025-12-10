@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import './App.css';
 import { calendarSearch, calendarCreate, storeBooking, llmAgent } from "./firebase";
 
@@ -6,118 +6,192 @@ function App() {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
   const [transcript, setTranscript] = useState("");
+  const [liveLine, setLiveLine] = useState("");
   const [appointment, setAppointment] = useState(null);
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
-  const [conversation, setConversation] = useState([
-    { role: 'system', content: 'You are Sofia, an empathetic, professional AI booking agent for Ideudas. Your job is to help the user book a free, no-commitment 30-minute consultation in the next 48 hours. Always check available slots before suggesting times. Be friendly, non-judgmental, and efficient.' }
-  ]);
+  const transcriptBoxRef = useRef(null);
+  const [calendarLog, setCalendarLog] = useState("");
+  const [isAutoListening, setIsAutoListening] = useState(false);
+  const [availableSlots, setAvailableSlots] = useState([]);
+  const [conversation, setConversation] = useState([]);
+  const [showPromptEditor, setShowPromptEditor] = useState(false);
+  const defaultPrompt = `Eres Sofia, asistente virtual de reservas de Ideudas (consultoría legal de alivio de deudas).
 
-  // Responsive form handler
+OBJETIVO: Agendar una consulta gratuita de 30 minutos lo MÁS RÁPIDO posible. Mantén la llamada CORTA.
+
+REGLAS CRÍTICAS:
+1. NUNCA saludes más de una vez. Después del saludo inicial, ve DIRECTO al grano.
+2. NUNCA preguntes nombre, email o teléfono - ya los tienes.
+3. SIEMPRE di las horas con "de la mañana" o "de la tarde" (ejemplo: "10 de la mañana", "3 de la tarde").
+4. SIEMPRE menciona que el cliente puede pulsar directamente el botón con el horario que prefiera.
+5. Respuestas ULTRA CORTAS - máximo 2 frases.
+6. Cuando el usuario confirme o diga "sí", di SOLO: "Perfecto, tu cita queda reservada. Recibirás la invitación por email. ¡Hasta pronto!" y TERMINA.
+7. NO hagas preguntas innecesarias. NO pidas confirmaciones extra.
+8. Si el usuario menciona una hora, ACEPTA y RESERVA inmediatamente.
+9. Responde SIEMPRE en español.
+10. Tu meta es terminar la llamada en menos de 3 intercambios.`;
+  const [systemPrompt, setSystemPrompt] = useState(defaultPrompt);
+
+  useEffect(() => {
+    if (transcriptBoxRef.current) {
+      transcriptBoxRef.current.scrollTop = transcriptBoxRef.current.scrollHeight;
+    }
+  }, [transcript, liveLine]);
+
   const handleChange = (e) => {
     setForm({ ...form, [e.target.name]: e.target.value });
   };
 
-  // Voice agent: browser speech-to-text
-  // On speech end, send to LLM
-  // Helper: Try to extract a date/time from LLM reply (simple regex, can be improved)
   function extractDateTime(text) {
-    // Looks for e.g. "Dec 12, 2025 10:00 AM" or "2025-12-12 10:00"
     const dateRegex = /(\w{3,9} \d{1,2}, \d{4} \d{1,2}:\d{2} ?[APMapm]{0,2})|((\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}))/;
     const match = text.match(dateRegex);
     return match ? match[0] : null;
   }
 
-  // Try to automate booking if LLM confirms a time
+  // Detect if user is confirming/accepting a time
+  function detectConfirmation(text) {
+    const lower = text.toLowerCase().trim();
+    const confirmWords = ['sí', 'si', 'ok', 'vale', 'perfecto', 'bien', 'de acuerdo', 'esa', 'ese', 'la primera', 'la segunda', 'primera', 'segunda', 'confirmo', 'adelante', 'listo', 'genial', 'claro'];
+    return confirmWords.some(word => lower.includes(word));
+  }
+
+  // Find matching slot from user input
+  function findMatchingSlot(text, slots) {
+    const lower = text.toLowerCase();
+    
+    // Check for ordinal references
+    if (lower.includes('primera') || lower.includes('la 1') || lower.includes('esa')) {
+      return slots[0];
+    }
+    if (lower.includes('segunda') || lower.includes('la 2')) {
+      return slots[1];
+    }
+    
+    // Extract hour from user input
+    const hourMatch = lower.match(/(\d{1,2})\s*(am|pm|a\.m|p\.m|de la mañana|de la tarde)?/i);
+    if (hourMatch) {
+      let hour = parseInt(hourMatch[1]);
+      const isPM = hourMatch[2] && (hourMatch[2].includes('p') || hourMatch[2].includes('tarde'));
+      if (isPM && hour < 12) hour += 12;
+      if (!isPM && hour === 12) hour = 0;
+      
+      // Find slot that matches the hour
+      return slots.find(slot => {
+        const slotDate = new Date(slot.start);
+        return slotDate.getHours() === hour || slotDate.getHours() === hour + 12;
+      });
+    }
+    
+    // If user just confirms, return first available
+    if (detectConfirmation(text)) {
+      return slots[0];
+    }
+    
+    return null;
+  }
+
   const handleSpeechEnd = async (finalTranscript) => {
     if (!finalTranscript.trim()) return;
+    setIsAutoListening(false);
+    
+    // Check if user is confirming a time slot
+    const matchedSlot = findMatchingSlot(finalTranscript, availableSlots);
+    
+    if (matchedSlot) {
+      // User confirmed! Book immediately without asking LLM
+      setTranscript(t => t + (t ? '\n' : '') + 'User: ' + finalTranscript);
+      setCalendarLog(prev => prev + `\n[Reserva] Usuario confirmó horario`);
+      setCalendarLog(prev => prev + `\n[Calendario] Creando evento para: ${matchedSlot.time}...`);
+      
+      try {
+        const createRes = await calendarCreate({ slot: matchedSlot, name: form.name, email: form.email, phone: form.phone });
+        const expert = createRes.data?.expert || { name: 'Experto Ideudas' };
+        setCalendarLog(prev => prev + `\n[Calendario] Evento creado con experto: ${expert.name}`);
+        setCalendarLog(prev => prev + `\n[Calendario] Enviando invitación a ${form.email}...`);
+        await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: { ...matchedSlot, expert: expert.name }, transcript });
+        setAppointment({ ...matchedSlot, expert: expert.name });
+        setCalendarLog(prev => prev + '\n[Calendario] ✓ Reserva completada exitosamente');
+        
+        // Say goodbye and end call
+        const goodbye = `Perfecto ${form.name}, tu cita queda reservada para ${matchedSlot.time}. Recibirás la invitación en ${form.email}. ¡Hasta pronto!`;
+        setTranscript(t => t + '\nSofia: ' + goodbye);
+        
+        if ('speechSynthesis' in window) {
+          const utterance = new SpeechSynthesisUtterance(goodbye);
+          utterance.lang = 'es-ES';
+          utterance.rate = 1.5;
+          utterance.onend = () => setStep(3);
+          window.speechSynthesis.speak(utterance);
+        } else {
+          setStep(3);
+        }
+        return;
+      } catch (err) {
+        console.error('Booking error:', err);
+        setCalendarLog(prev => prev + `\n[Error] ${err.message}`);
+      }
+    }
+    
+    // No confirmation detected, proceed with LLM
     const updated = [
       ...conversation,
       { role: 'user', content: finalTranscript }
     ];
     setConversation(updated);
-    setTranscript(t => t + '\nUser: ' + finalTranscript);
-    // Call LLM agent
     try {
       console.log('Calling LLM with messages:', updated);
+      setCalendarLog(prev => prev + '\n[LLM] Procesando solicitud...');
       const res = await llmAgent({ messages: updated });
       console.log('LLM response:', res);
       const reply = res.data?.reply || '';
       if (!reply) {
-        setTranscript(t => t + '\nSofia: (No response from LLM)');
+        setTranscript(t => t + '\nSofia: (Sin respuesta del LLM)');
         return;
       }
       setConversation(c => [...c, { role: 'assistant', content: reply }]);
-      setTranscript(t => t + '\nSofia: ' + reply);
+      setTranscript(t => t + (t ? '\n' : '') + 'Sofia: ' + reply);
       
-      // Speak the response using Web Speech API (English)
       if ('speechSynthesis' in window) {
         const utterance = new SpeechSynthesisUtterance(reply);
-        utterance.lang = 'en-US';
-        utterance.rate = 1;
+        utterance.lang = 'es-ES';
+        utterance.rate = 1.5;
         utterance.pitch = 1;
         utterance.volume = 1;
-        window.speechSynthesis.cancel(); // Cancel any previous speech
+        window.speechSynthesis.cancel();
         
-        // Auto-start listening after Sofia finishes speaking
         utterance.onend = () => {
           setTimeout(() => {
+            setIsAutoListening(true);
             startListening();
-          }, 1000); // 1 second delay before listening again
+          }, 1000);
         };
         
         window.speechSynthesis.speak(utterance);
       }
-
-      // Try to extract a date/time and automate booking
-      const dt = extractDateTime(reply);
-      let slotRes = await calendarSearch({});
-      let slots = slotRes.data?.slots || [];
-      if (dt) {
-        // Try to find a slot that matches the extracted time (loose match)
-        let found = slots.find(s => s.time.includes(dt) || s.start.includes(dt));
-        // If not found, escalate to next 24h
-        if (!found && slots.length === 0) {
-          // Try next 24h
-          const now = new Date();
-          const next24h = new Date(now.getTime() + 72 * 60 * 60 * 1000);
-          slotRes = await calendarSearch({ timeMin: now.toISOString(), timeMax: next24h.toISOString() });
-          slots = slotRes.data?.slots || [];
-          found = slots.find(s => s.time.includes(dt) || s.start.includes(dt));
-        }
-        if (found) {
-          // Book it and get expert
-          const createRes = await calendarCreate({ slot: found, name: form.name, email: form.email });
-          const expert = createRes.data?.expert || { name: 'Ideudas Expert' };
-          await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: { ...found, expert: expert.name }, transcript: transcript });
-          setAppointment({ ...found, expert: expert.name });
-          setStep(3);
-          setTranscript(t => t + `\nSofia: Your appointment for ${found.time} with ${expert.name} is confirmed! A calendar invite has been sent to ${form.email}.`);
-        } else {
-          setTranscript(t => t + '\nSofia: Sorry, that slot is no longer available. Here are some alternatives: ' + slots.map(s => s.time).join(', '));
-        }
-      } else if (slots.length === 0) {
-        setTranscript(t => t + '\nSofia: Sorry, there are no available slots in the next 48 hours. The next available slot is in the following 24 hours.');
-      }
     } catch (err) {
       console.error('Error in handleSpeechEnd:', err);
+      setCalendarLog(prev => prev + `\n[Error] ${err.message}`);
       setTranscript(t => t + '\nSofia: (Error: ' + err.message + ')');
     }
   };
 
   const startListening = () => {
     if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-      setTranscript('Live transcription not supported in this browser.');
+      setTranscript('Reconocimiento de voz no soportado en este navegador.');
       return;
     }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
+    recognition.lang = 'es-ES';
     recognition.interimResults = true;
-    recognition.continuous = false;
+    recognition.continuous = true;
     let finalTranscript = '';
     recognition.onresult = (event) => {
       let interim = '';
+      if (event.resultIndex === 0) {
+        finalTranscript = '';
+      }
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         const transcript = event.results[i][0].transcript;
         if (event.results[i].isFinal) {
@@ -126,11 +200,21 @@ function App() {
           interim += transcript;
         }
       }
-      setTranscript(finalTranscript + interim);
+      setLiveLine((finalTranscript + interim).trim());
     };
     recognition.onend = () => {
       setListening(false);
-      if (finalTranscript.trim()) handleSpeechEnd(finalTranscript.trim());
+      if (finalTranscript.trim()) {
+        const cleaned = finalTranscript.trim();
+        setTranscript(t => t + (t ? '\n' : '') + 'User: ' + cleaned);
+        setLiveLine('');
+        handleSpeechEnd(cleaned);
+      } else {
+        setLiveLine('');
+        if (isAutoListening) {
+          setTimeout(() => startListening(), 500);
+        }
+      }
     };
     recognitionRef.current = recognition;
     recognition.start();
@@ -141,48 +225,151 @@ function App() {
     if (recognitionRef.current) {
       recognitionRef.current.stop();
       setListening(false);
+      setIsAutoListening(false);
     }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setStep(2);
-    await storeBooking({ name: form.name, email: form.email, phone: form.phone, transcript: '' });
-    // Greet and ask for confirmation via LLM
-    const intro = `Hello! Thank you for your interest in Ideudas. I'm Sofia, your AI booking assistant. Before we start, can you please confirm the email address we have for you is ${form.email}?`;
-    setTranscript('Sofia: ' + intro);
-    setConversation(c => [...c, { role: 'assistant', content: intro }]);
+    setCalendarLog('[Inicio] Conversación iniciada\n[Audio] Configurado en español');
     
-    // Speak the intro greeting
+    // Store booking in background (don't block on it)
+    storeBooking({ name: form.name, email: form.email, phone: form.phone, transcript: '' })
+      .catch(err => console.log('Store booking error (non-blocking):', err));
+    
+    // Fetch available slots first
+    setCalendarLog(prev => prev + '\n[Calendario] Buscando franjas disponibles...');
+    let slotsText = "mañana a las 10am o a las 3pm";
+    let slots = [];
+    try {
+      const slotRes = await calendarSearch({});
+      slots = slotRes.data?.slots || [];
+      setAvailableSlots(slots); // Save slots for later use
+      setCalendarLog(prev => prev + `\n[Calendario] Se encontraron ${slots.length} franjas`);
+      if (slots.length >= 2) {
+        slotsText = `${slots[0].time} o ${slots[1].time}`;
+      } else if (slots.length === 1) {
+        slotsText = slots[0].time;
+      }
+    } catch (err) {
+      console.log('Error fetching slots:', err);
+    }
+    
+    const userContext = `DATOS DEL USUARIO (NO preguntar):
+- Nombre: ${form.name}
+- Email: ${form.email}
+- Teléfono: ${form.phone}
+
+FRANJAS DISPONIBLES: ${slotsText}
+
+INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases. Si el usuario confirma cualquier hora, reserva y despídete. Recuerda mencionar que pueden pulsar el botón del horario preferido.`;
+    
+    const intro = `¡Hola ${form.name}! Soy Sofia de Ideudas. Tengo disponible ${slotsText}. Puedes decirme cuál prefieres o pulsar directamente el botón del horario que te venga mejor.`;
+    
+    // Initialize conversation with full context
+    setConversation([
+      { role: 'system', content: systemPrompt },
+      { role: 'system', content: userContext },
+      { role: 'assistant', content: intro }
+    ]);
+    setTranscript('Sofia: ' + intro);
+    setCalendarLog(prev => prev + '\n[TTS] Iniciando síntesis de voz...');
+    
+    // Speak the greeting
     if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(intro);
-      utterance.lang = 'en-US';
-      utterance.rate = 1;
-      utterance.pitch = 1;
-      utterance.volume = 1;
+      // Cancel any existing speech
+      window.speechSynthesis.cancel();
       
-      // Auto-start listening after intro greeting
-      utterance.onend = () => {
-        setTimeout(() => {
-          startListening();
-        }, 1000);
-      };
+      setTimeout(() => {
+        const utterance = new SpeechSynthesisUtterance(intro);
+        utterance.lang = 'es-ES';
+        utterance.rate = 1.5;
+        utterance.pitch = 1;
+        utterance.volume = 1;
+        
+        utterance.onstart = () => {
+          console.log('Speech synthesis started');
+          setCalendarLog(prev => prev + '\n[TTS] ▶ Hablando...');
+        };
+        
+        utterance.onerror = (event) => {
+          console.error('Speech synthesis error:', event.error);
+          setCalendarLog(prev => prev + `\n[TTS] ✗ Error: ${event.error}`);
+          // Auto-start listening even if TTS fails
+          setTimeout(() => {
+            setIsAutoListening(true);
+            startListening();
+          }, 1000);
+        };
+        
+        utterance.onend = () => {
+          console.log('Speech synthesis ended');
+          setCalendarLog(prev => prev + '\n[TTS] ✓ Completado. Iniciando escucha...');
+          setTimeout(() => {
+            setIsAutoListening(true);
+            startListening();
+          }, 1000);
+        };
+        
+        window.speechSynthesis.speak(utterance);
+      }, 100);
+    } else {
+      setCalendarLog(prev => prev + '\n[TTS] ✗ Síntesis de voz no disponible');
+      // Auto-start listening if TTS not available
+      setTimeout(() => {
+        setIsAutoListening(true);
+        startListening();
+      }, 1000);
+    }
+  };
+
+  // Handle slot button click - book immediately
+  const handleSlotClick = async (slot) => {
+    setCalendarLog(prev => prev + `\n[Reserva] Usuario seleccionó: ${slot.time}`);
+    setCalendarLog(prev => prev + `\n[Calendario] Creando evento...`);
+    
+    try {
+      const createRes = await calendarCreate({ slot, name: form.name, email: form.email, phone: form.phone });
+      const expert = createRes.data?.expert || { name: 'Experto Ideudas' };
+      setCalendarLog(prev => prev + `\n[Calendario] Evento creado con: ${expert.name}`);
+      setCalendarLog(prev => prev + `\n[Calendario] Enviando invitación a ${form.email}...`);
+      await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: { ...slot, expert: expert.name }, transcript });
+      setAppointment({ ...slot, expert: expert.name });
+      setCalendarLog(prev => prev + '\n[Calendario] ✓ Reserva completada');
       
-      window.speechSynthesis.speak(utterance);
+      // Say goodbye
+      const goodbye = `Perfecto ${form.name}, tu cita queda reservada para ${slot.time}. Recibirás la invitación en ${form.email}. ¡Hasta pronto!`;
+      setTranscript(t => t + '\nSofia: ' + goodbye);
+      
+      // Stop listening
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      window.speechSynthesis.cancel();
+      
+      if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(goodbye);
+        utterance.lang = 'es-ES';
+        utterance.rate = 1.5;
+        utterance.onend = () => setStep(3);
+        window.speechSynthesis.speak(utterance);
+      } else {
+        setStep(3);
+      }
+    } catch (err) {
+      console.error('Booking error:', err);
+      setCalendarLog(prev => prev + `\n[Error] ${err.message}`);
+      setTranscript(t => t + '\nSofia: Hubo un error al reservar. Por favor, intenta de nuevo.');
     }
   };
 
   const handleEndCall = async () => {
-    // Simulate booking confirmation
-    const slot = { date: "Dec 12, 2025", time: "10:00 AM", expert: "Maria Lopez" };
-    try {
-      await calendarCreate({ slot });
-      await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: slot });
-      setAppointment(slot);
-      setStep(3);
-    } catch (err) {
-      setTranscript("Sofia: There was an error booking your appointment. Please try again later.");
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
     }
+    window.speechSynthesis.cancel();
+    setStep(3);
   };
 
   return (
@@ -192,36 +379,103 @@ function App() {
       </header>
       {step === 1 && (
         <form className="form" onSubmit={handleSubmit}>
-          <h2>Book Your Free Consultation</h2>
-          <input name="name" type="text" placeholder="Full Name" required value={form.name} onChange={handleChange} />
-          <input name="email" type="email" placeholder="Email Address" required value={form.email} onChange={handleChange} />
-          <input name="phone" type="tel" placeholder="Phone Number" required value={form.phone} onChange={handleChange} />
-          <button type="submit" className="cta">Start My Free Consultation Booking</button>
-          <p className="info">You are about to connect with an AI Voice Agent to book your free, no-commitment consultation.</p>
+          <h2>Reserva tu Consulta Gratuita</h2>
+          <input name="name" type="text" placeholder="Nombre Completo" required value={form.name} onChange={handleChange} />
+          <input name="email" type="email" placeholder="Correo Electrónico" required value={form.email} onChange={handleChange} />
+          <input name="phone" type="tel" placeholder="Número de Teléfono" required value={form.phone} onChange={handleChange} />
+          <button type="submit" className="cta">Comenzar Reserva de Consulta Gratuita</button>
+          <p className="info">Estás a punto de conectar con un Agente de Voz IA para reservar tu consulta gratuita sin compromiso.</p>
+          
+          <div className="prompt-editor-toggle">
+            <button type="button" className="toggle-btn" onClick={() => setShowPromptEditor(!showPromptEditor)}>
+              {showPromptEditor ? '▼ Ocultar' : '▶ Mostrar'} Instrucciones del Agente (Modo Prototipo)
+            </button>
+          </div>
+          {showPromptEditor && (
+            <div className="prompt-editor">
+              <label>Instrucciones del Voice Agent:</label>
+              <textarea
+                value={systemPrompt}
+                onChange={(e) => setSystemPrompt(e.target.value)}
+                rows={12}
+                placeholder="Escribe las instrucciones para el agente..."
+              />
+              <button type="button" className="reset-btn" onClick={() => setSystemPrompt(defaultPrompt)}>
+                Restaurar Instrucciones Predeterminadas
+              </button>
+            </div>
+          )}
         </form>
       )}
       {step === 2 && (
         <div className="voice-agent">
-          <div className="status">Connecting with Ideudas Booking Agent...</div>
+          <div className="status">Conectando con el Agente de Reservas de Ideudas...</div>
           <div className="transcript">
-            <h3>Live Transcription</h3>
-            <div className="transcript-box">{transcript || "(Transcription will appear here)"}</div>
+            <h3>Transcripción en Vivo</h3>
+            <div className="transcript-box" ref={transcriptBoxRef}>
+              {transcript ? (
+                <>
+                  {transcript.split('\n').filter(line => line.trim()).map((line, idx) => (
+                    <div key={idx} className={`message ${line.startsWith('Sofia:') ? 'sofia-message' : 'user-message'}`}>
+                      {line}
+                    </div>
+                  ))}
+                  {liveLine && (
+                    <div className="message live-message">🎤 {liveLine}</div>
+                  )}
+                </>
+              ) : (
+                <div className="message" style={{color: '#999'}}>(La transcripción aparecerá aquí)</div>
+              )}
+            </div>
           </div>
-          {!listening ? (
-            <button className="cta" onClick={startListening} type="button">Start Voice Transcription</button>
-          ) : (
-            <button className="cta" onClick={stopListening} type="button">Stop Transcription</button>
+          
+          {availableSlots.length > 0 && (
+            <div className="slot-buttons">
+              <h4>📅 Selecciona un horario:</h4>
+              <div className="slots-grid">
+                {availableSlots.map((slot, idx) => (
+                  <button
+                    key={idx}
+                    className="slot-btn"
+                    onClick={() => handleSlotClick(slot)}
+                  >
+                    {slot.time}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
-          <button className="end-call" onClick={handleEndCall}>End Call</button>
+          
+          <button className="end-call" onClick={stopListening}>Detener Escucha</button>
+          <div className="calendar-log">
+            <h3>Registro de Calendario</h3>
+            <div className="log-box">{calendarLog || "(Los registros aparecerán aquí)"}</div>
+          </div>
+          <button className="end-call" onClick={handleEndCall}>Finalizar Llamada</button>
         </div>
       )}
       {step === 3 && appointment && (
         <div className="success">
-          <h2>Success! Your Appointment is Booked.</h2>
-          <p><strong>Date:</strong> {appointment.date || appointment.time?.split(' ')[0]}</p>
-          <p><strong>Time:</strong> {appointment.time}</p>
-          <p><strong>Expert:</strong> {appointment.expert}</p>
-          <p>A calendar invitation with your video call link has been sent to <strong>{form.email}</strong>.</p>
+          <h2>¡Éxito! Tu Cita Ha Sido Reservada.</h2>
+          <p><strong>Fecha:</strong> {appointment.date || appointment.time?.split(' ')[0]}</p>
+          <p><strong>Hora:</strong> {appointment.time}</p>
+          <p><strong>Experto:</strong> {appointment.expert}</p>
+          <p>Una invitación de calendario con tu enlace de videollamada ha sido enviada a <strong>{form.email}</strong>.</p>
+          <div className="conversation-summary">
+            <h3>📝 Resumen de la Conversación</h3>
+            <div className="summary-box">
+              {transcript.split('\n').filter(line => line.trim()).map((line, idx) => (
+                <div key={idx} className={`message ${line.startsWith('Sofia:') ? 'sofia-message' : 'user-message'}`}>
+                  {line}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="calendar-log">
+            <h3>Detalles de Reserva</h3>
+            <div className="log-box">{calendarLog}</div>
+          </div>
         </div>
       )}
     </div>
