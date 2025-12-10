@@ -5,7 +5,7 @@ import RealtimeAgent from "./realtimeAgent";
 
 function App() {
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState({ name: "", email: "", phone: "" });
+  const [form, setForm] = useState({ name: "", email: "", phone: "", additionalEmails: "" });
   const [transcript, setTranscript] = useState("");
   const [liveLine, setLiveLine] = useState("");
   const [appointment, setAppointment] = useState(null);
@@ -80,18 +80,25 @@ REGLAS CRÍTICAS:
       utterance.pitch = 1;
       utterance.volume = 1;
       
+      utterance.onstart = () => {
+        console.log('✓ Audio iniciado');
+        setCalendarLog(prev => prev + '\n[Audio] ▶ Reproduciendo...');
+      };
+      
       utterance.onend = () => {
+        console.log('✓ Audio completado');
         setUnspokenText("");
         if (onEnd) onEnd();
       };
       
       utterance.onerror = (event) => {
-        console.error('Speech synthesis error:', event);
-        setUnspokenText(text); // Fallback: show text if audio fails
+        console.error('✗ Error de audio:', event.error);
+        setUnspokenText(text); // Show text as fallback
         if (onEnd) onEnd();
       };
       
-      window.speechSynthesis.speak(utterance);
+      const result = window.speechSynthesis.speak(utterance);
+      console.log('Iniciando speech:', result);
     } catch (err) {
       console.error('Speech error:', err);
       setUnspokenText(text);
@@ -121,26 +128,46 @@ REGLAS CRÍTICAS:
     // Try to match time patterns: "12 del mediodía", "las 12", "12 pm", etc.
     let targetHour = null;
     
-    // Match "X de la mañana" or "X de la tarde" or "las X"
-    const timePattern = /(?:las\s+)?(\d{1,2})\s*(?:de la|del)?\s*(?:mañana|mediodía|tarde|am|pm)?/i;
-    const timeMatch = text.match(timePattern);
+    // IMPROVED: Match time AFTER "de la tarde/mañana/mediodía" to avoid matching dates
+    // Pattern: "X de la tarde" or "X de la mañana" or "X del mediodía"
+    const timePatternTarde = /(\d{1,2})\s*(?:y\s*media|\s*y\s*30)?\s*de\s*la\s*tarde/i;
+    const timePatternManana = /(\d{1,2})\s*(?:y\s*media|\s*y\s*30)?\s*de\s*la\s*mañana/i;
+    const timePatternMedioDia = /(\d{1,2})\s*(?:y\s*media|\s*y\s*30)?\s*del?\s*mediodía/i;
+    const timePatternSimple = /las\s*(\d{1,2})\s*(?:horas)?/i;
     
+    let timeMatch = text.match(timePatternTarde);
+    let hour = null;
     if (timeMatch) {
-      let hour = parseInt(timeMatch[1]);
-      const isMorning = lower.includes('mañana');
-      const isAfternoon = lower.includes('tarde');
-      const isMidday = lower.includes('mediodía');
-      
-      // Adjust hour based on time of day
-      if (isAfternoon && hour < 12 && hour !== 12) {
-        hour += 12;
-      } else if (isMorning && hour === 12) {
-        hour = 0;
-      } else if (isMidday) {
-        // Mediodía is 12pm = hour 12
-        hour = 12;
-      }
+      hour = parseInt(timeMatch[1]);
+      if (hour < 12) hour += 12; // Convert afternoon times to 24h format
       targetHour = hour;
+      console.log('Matched tarde pattern, hour:', hour);
+    } else {
+      timeMatch = text.match(timePatternManana);
+      if (timeMatch) {
+        hour = parseInt(timeMatch[1]);
+        if (hour === 12) hour = 0; // 12 mañana = midnight
+        targetHour = hour;
+        console.log('Matched mañana pattern, hour:', hour);
+      } else {
+        timeMatch = text.match(timePatternMedioDia);
+        if (timeMatch) {
+          hour = parseInt(timeMatch[1]);
+          targetHour = hour; // Mediodía stays as is (12)
+          console.log('Matched mediodía pattern, hour:', hour);
+        } else {
+          timeMatch = text.match(timePatternSimple);
+          if (timeMatch) {
+            hour = parseInt(timeMatch[1]);
+            // If time is 1-11 and afternoon context, assume PM
+            if (hour < 12 && (lower.includes('tarde') || lower.includes('pm'))) {
+              hour += 12;
+            }
+            targetHour = hour;
+            console.log('Matched simple pattern, hour:', hour);
+          }
+        }
+      }
     }
     
     // Find slot that matches the hour
@@ -148,12 +175,15 @@ REGLAS CRÍTICAS:
       const matched = slots.find(slot => {
         const slotDate = new Date(slot.start);
         const slotHour = slotDate.getHours();
+        console.log(`Comparing slot hour ${slotHour} with target hour ${targetHour}`);
         return slotHour === targetHour || slotHour === (targetHour % 24);
       });
       
       if (matched) {
-        console.log(`Matched slot with hour ${targetHour}: ${matched.time}`);
+        console.log(`✓ Matched slot with hour ${targetHour}: ${matched.start}`);
         return matched;
+      } else {
+        console.log(`✗ No slot found matching hour ${targetHour}`);
       }
     }
     
@@ -168,18 +198,32 @@ REGLAS CRÍTICAS:
   const handleSpeechEnd = async (finalTranscript) => {
     if (!finalTranscript.trim()) return;
     setIsAutoListening(false);
-    
+
+    console.log('User said:', finalTranscript);
+
+    // Esperar a que los slots estén disponibles (máx 1s)
+    let retries = 0;
+    let slotsReady = availableSlots && availableSlots.length > 0;
+    while (!slotsReady && retries < 10) {
+      await new Promise(res => setTimeout(res, 100));
+      slotsReady = availableSlots && availableSlots.length > 0;
+      retries++;
+    }
+    console.log('Available slots:', availableSlots);
+
     // Check if user is confirming a time slot
     const matchedSlot = findMatchingSlot(finalTranscript, availableSlots);
-    
+    console.log('Matched slot:', matchedSlot);
+
     if (matchedSlot) {
       // User confirmed! Book immediately without asking LLM
       setTranscript(t => t + (t ? '\n' : '') + 'User: ' + finalTranscript);
       setCalendarLog(prev => prev + `\n[Reserva] Usuario confirmó horario`);
       setCalendarLog(prev => prev + `\n[Calendario] Creando evento para: ${matchedSlot.time}...`);
-      
+
       try {
-        const createRes = await calendarCreate({ slot: matchedSlot, name: form.name, email: form.email, phone: form.phone });
+        const additionalEmails = form.additionalEmails ? form.additionalEmails.split(',').map(e => e.trim()).filter(e => e) : [];
+        const createRes = await calendarCreate({ slot: matchedSlot, name: form.name, email: form.email, phone: form.phone, additionalEmails });
         setCalendarLog(prev => prev + `\n[Calendario] Evento creado exitosamente`);
         setCalendarLog(prev => prev + `\n[Calendario] Enviando invitación a ${form.email}...`);
         await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: matchedSlot, transcript });
@@ -240,14 +284,14 @@ REGLAS CRÍTICAS:
           setTimeout(() => {
             setIsAutoListening(true);
             startListening();
-          }, 1000);
+          }, 500); // Reduced from 1000ms
         };
         
         speak(reply, () => {
           setTimeout(() => {
             setIsAutoListening(true);
             startListening();
-          }, 1000);
+          }, 500); // Reduced from 1000ms
         });
       }
       } catch (err) {
@@ -266,7 +310,7 @@ REGLAS CRÍTICAS:
     const recognition = new SpeechRecognition();
     recognition.lang = 'es-ES';
     recognition.interimResults = true;
-    recognition.continuous = true;
+    recognition.continuous = false; // Stop automatically when speech ends
     let finalTranscript = '';
     recognition.onresult = (event) => {
       let interim = '';
@@ -293,7 +337,7 @@ REGLAS CRÍTICAS:
       } else {
         setLiveLine('');
         if (isAutoListening) {
-          setTimeout(() => startListening(), 500);
+          setTimeout(() => startListening(), 300); // Reduced from 500ms
         }
       }
     };
@@ -408,18 +452,7 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
           }, 1000);
         };
         
-        speak(formattedReply, () => {
-          console.log('Speech synthesis ended');
-          setCalendarLog(prev => prev + '\n[TTS] ✓ Completado. Iniciando escucha...');
-          setTimeout(() => {
-            if (useRealtime) {
-              initializeRealtime();
-            } else {
-              setIsAutoListening(true);
-              startListening();
-            }
-          }, 1000);
-        });
+        window.speechSynthesis.speak(utterance);
       }, 100);
     } else {
       setCalendarLog(prev => prev + '\n[TTS] ✗ Síntesis de voz no disponible');
@@ -468,7 +501,8 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
     setCalendarLog(prev => prev + `\n[Calendario] Creando evento...`);
     
     try {
-      const createRes = await calendarCreate({ slot, name: form.name, email: form.email, phone: form.phone });
+      const additionalEmails = form.additionalEmails ? form.additionalEmails.split(',').map(e => e.trim()).filter(e => e) : [];
+      const createRes = await calendarCreate({ slot, name: form.name, email: form.email, phone: form.phone, additionalEmails });
       setCalendarLog(prev => prev + `\n[Calendario] Evento creado exitosamente`);
       setCalendarLog(prev => prev + `\n[Calendario] Enviando invitación a ${form.email}...`);
       await storeBooking({ name: form.name, email: form.email, phone: form.phone, appointment: slot, transcript });
@@ -529,6 +563,7 @@ INSTRUCCIÓN: Ya saludaste. A partir de ahora, respuestas de máximo 1-2 frases.
           <input name="name" type="text" placeholder="Nombre Completo" required value={form.name} onChange={handleChange} />
           <input name="email" type="email" placeholder="Correo Electrónico" required value={form.email} onChange={handleChange} />
           <input name="phone" type="tel" placeholder="Número de Teléfono" required value={form.phone} onChange={handleChange} />
+          <input name="additionalEmails" type="text" placeholder="Emails Adicionales (separados por comas, opcional)" value={form.additionalEmails} onChange={handleChange} />
           <button type="submit" className="cta">Comenzar Reserva de Consulta Gratuita</button>
           <p className="info">Estás a punto de conectar con un Agente de Voz IA para reservar tu consulta gratuita sin compromiso.</p>
           

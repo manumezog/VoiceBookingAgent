@@ -65,9 +65,12 @@ exports.llm_agent = functions.https.onCall(async (data, context) => {
 });
 
 exports.calendar_search = functions.https.onCall(async (data, context) => {
+  // Get available time slots for next 48 hours
   const calendar = getCalendarClient();
   const now = new Date();
   const end = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+  
+  console.log('DEBUG calendar_search: now =', now.toISOString(), ', end =', end.toISOString());
   
   // Get events and check transparency (free/busy)
   const events = await calendar.events.list({
@@ -78,11 +81,15 @@ exports.calendar_search = functions.https.onCall(async (data, context) => {
     orderBy: 'startTime',
   });
   
+  console.log('DEBUG calendar_search: Total events fetched =', (events.data.items || []).length);
+  
   // Filter only BUSY events (ignore events marked as "free"/transparent)
   const busyEvents = (events.data.items || []).filter(event => {
     // transparency: 'transparent' means "free", 'opaque' or undefined means "busy"
     return event.transparency !== 'transparent';
   });
+  
+  console.log('DEBUG calendar_search: Busy events =', busyEvents.length);
   
   const slots = [];
   let current = new Date(now);
@@ -108,6 +115,7 @@ exports.calendar_search = functions.https.onCall(async (data, context) => {
     
     // Skip if outside business hours (9am-6pm)
     if (current.getHours() < 9 || slotEnd.getHours() > 18 || (slotEnd.getHours() === 18 && slotEnd.getMinutes() > 0)) {
+      console.log('DEBUG: Skipping slot', current.toISOString(), '- outside business hours');
       current.setDate(current.getDate() + 1);
       current.setHours(9, 0, 0, 0);
       continue;
@@ -127,17 +135,20 @@ exports.calendar_search = functions.https.onCall(async (data, context) => {
       const ampm = hour >= 12 ? 'de la tarde' : 'de la mañana';
       const hour12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
       const minuteStr = minute === 0 ? '' : `:${minute.toString().padStart(2, '0')}`;
-      
+
       const dayNames = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
       const monthNames = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
-      
+
       const timeStr = `${dayNames[current.getDay()]}, ${current.getDate()} de ${monthNames[current.getMonth()]}, ${hour12}${minuteStr} ${ampm}`;
-      
+
       slots.push({
         start: current.toISOString(),
         end: slotEnd.toISOString(),
         time: timeStr,
       });
+      console.log('DEBUG: Added slot', current.toISOString(), timeStr);
+    } else {
+      console.log('DEBUG: Conflict for slot', current.toISOString());
     }
     current = slotEnd;
   }
@@ -146,11 +157,11 @@ exports.calendar_search = functions.https.onCall(async (data, context) => {
 });
 
 exports.calendar_create = functions.https.onCall(async (data, context) => {
-  const { slot, name, email, phone } = data;
+  const { slot, name, email, phone, additionalEmails } = data;
   const calendar = getCalendarClient();
   const expert = assignExpert(slot);
   try {
-    // Create event WITHOUT attendees to avoid Domain-Wide Delegation requirement
+    // Create event WITHOUT attendees (service account lacks Domain-Wide Delegation)
     // Client info is stored in description instead
     const eventRes = await calendar.events.insert({
       calendarId: IDEUDAS_CALENDAR_ID,
